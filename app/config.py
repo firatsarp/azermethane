@@ -26,7 +26,10 @@ QA_MIN = 0.5
 
 TROPOMI_OFFL = ("S5P_L2__CH4____HiR", "2")
 TROPOMI_NRT = ("S5P_L2__CH4____HiR_NRT", "2")
-EMIT_PLUMES = ("EMITL2BCH4PLM", "002")
+
+# Carbon Mapper plume catalogue (Planet Tanager + NASA EMIT). Public, non-commercial use with attribution.
+CARBONMAPPER_API = "https://api.carbonmapper.org/api/v1/catalog/plumes/annotated"
+CARBONMAPPER_PAGE = 1000
 
 # Satellites to predict: name, NORAD id, coverage box (sub-point area from which Azerbaijan is visible)
 SATELLITES = {

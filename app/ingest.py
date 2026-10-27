@@ -1,15 +1,17 @@
-"""Fetches TROPOMI methane and EMIT methane plume data from NASA Earthdata."""
+"""Fetches TROPOMI methane from NASA Earthdata and methane plumes from Carbon Mapper."""
 import json
 import logging
 import shutil
 import tempfile
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
 
 from . import db
 from .config import (
-    BBOX, EMIT_PLUMES, NRT_DAYS, NX, NY, QA_MIN, TMP_DIR, BACKFILL_DAYS,
+    BBOX, CARBONMAPPER_API, CARBONMAPPER_PAGE, NRT_DAYS, NX, NY, QA_MIN, TMP_DIR, BACKFILL_DAYS,
     TROPOMI_NRT, TROPOMI_OFFL,
 )
 from .geo import cell_index, country_cell_mask, in_country
@@ -159,86 +161,52 @@ def ingest_tropomi():
     db.set_meta("tropomi_finished", _now().isoformat())
 
 
-# --- EMIT ----------------------------------------------------------------------
+# --- Carbon Mapper ---------------------------------------------------------------
 
-def _umm_polygon(g):
+def _fetch_carbonmapper():
+    """All published CH4 plumes intersecting the box, page by page."""
+    items, offset = [], 0
+    while True:
+        query = urllib.parse.urlencode(
+            [("bbox", v) for v in BBOX]
+            + [("plume_gas", "CH4"), ("status", "published"), ("limit", CARBONMAPPER_PAGE), ("offset", offset)]
+        )
+        req = urllib.request.Request(f"{CARBONMAPPER_API}?{query}", headers={"User-Agent": "azermethane/1.0"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            page = json.load(r)["items"]
+        items += page
+        if len(page) < CARBONMAPPER_PAGE:
+            return items
+        offset += CARBONMAPPER_PAGE
+
+
+def _plume_row(p):
+    lon, lat = p["geometry_json"]["coordinates"][:2]
+    # Carbon Mapper withholds some estimates (hide_emission); show the plume without a number then
+    emission = None if p.get("hide_emission") else p.get("emission_auto")
+    return (
+        p["plume_id"], p["scene_timestamp"], lat, lon, int(in_country([lon], [lat])[0]),
+        emission, p.get("emission_uncertainty_auto") if emission is not None else None,
+        p.get("sector"), p.get("platform"), p.get("wind_speed_avg_auto"),
+        p.get("plume_png"), json.dumps(p["plume_bounds"]) if p.get("plume_bounds") else None,
+    )
+
+
+def ingest_plumes():
+    """Carbon Mapper plume catalogue (Tanager + EMIT). The table is replaced on every run because
+    the image links are signed and expire, and Carbon Mapper can withdraw or revise plumes."""
     try:
-        geom = g["umm"]["SpatialExtent"]["HorizontalSpatialDomain"]["Geometry"]
-        pts = geom["GPolygons"][0]["Boundary"]["Points"]
-        return {"type": "Polygon", "coordinates": [[[p["Longitude"], p["Latitude"]] for p in pts]]}
-    except (KeyError, IndexError):
-        return None
-
-
-def _parse_plume_meta(path):
-    """EMIT CH4PLMMETA GeoJSON: polygon + point of max concentration and properties."""
-    gj = json.loads(open(path, encoding="utf-8").read())
-    props, polygon, point = {}, None, None
-    for f in gj.get("features", []):
-        props.update({k: v for k, v in (f.get("properties") or {}).items() if k != "style"})
-        geom = f.get("geometry") or {}
-        if geom.get("type") in ("Polygon", "MultiPolygon"):
-            polygon = geom
-        elif geom.get("type") == "Point":
-            point = geom["coordinates"][:2]
-    return props, polygon, point
-
-
-def _num(props, *keys):
-    for k in keys:
-        try:
-            return float(props[k])
-        except (KeyError, TypeError, ValueError):
-            pass
-    return None
-
-
-def ingest_emit():
-    """EMIT methane plume catalogue. Metadata is public; detailed properties require login."""
-    import earthaccess
-
-    TMP_DIR.mkdir(parents=True, exist_ok=True)
-    authed = login()
-    short_name, version = EMIT_PLUMES
-    granules = earthaccess.search_data(short_name=short_name, version=version, bounding_box=BBOX)
-    with db.read() as con:
-        done = {r[0] for r in con.execute("SELECT id FROM plumes WHERE props != '{}'")}
-    for g in granules:
-        gid = _granule_id(g)
-        if gid in done:
-            continue
-        props, polygon, point = {}, _umm_polygon(g), None
-        if authed:
-            links = [u for u in g.data_links() if "PLMMETA" in u and u.endswith(".json")]
-            if links:
-                tmp = tempfile.mkdtemp(dir=TMP_DIR)
-                try:
-                    files = earthaccess.download(links[:1], local_path=tmp, threads=1)
-                    if files:
-                        props, poly2, point = _parse_plume_meta(str(files[0]))
-                        polygon = poly2 or polygon
-                except Exception:
-                    log.exception("Could not download EMIT metadata: %s", gid)
-                finally:
-                    shutil.rmtree(tmp, ignore_errors=True)
-        lat = _num(props, "Latitude of max concentration")
-        lon = _num(props, "Longitude of max concentration")
-        if lat is None or lon is None:
-            if point:
-                lon, lat = point
-            elif polygon:
-                ring = np.asarray(polygon["coordinates"][0] if polygon["type"] == "Polygon"
-                                  else polygon["coordinates"][0][0], dtype=float)
-                lon, lat = ring[:, 0].mean(), ring[:, 1].mean()
-            else:
-                continue
-        inside = bool(in_country([lon], [lat])[0])
-        observed = props.get("UTC Time Observed") or _granule_start(g).isoformat()
-        with db.tx() as con:
-            con.execute(
-                "INSERT OR REPLACE INTO plumes(id, observed, lat, lon, inside, max_ppmm, props, geometry) VALUES(?,?,?,?,?,?,?,?)",
-                (gid, observed, lat, lon, int(inside),
-                 _num(props, "Max Plume Concentration (ppm m)"),
-                 json.dumps(props, ensure_ascii=False), json.dumps(polygon) if polygon else None),
-            )
-    db.set_meta("emit_finished", _now().isoformat())
+        rows = [_plume_row(p) for p in _fetch_carbonmapper()]
+    except Exception as e:
+        log.exception("Could not fetch the Carbon Mapper catalogue")
+        db.set_meta("last_error", f"{_now().isoformat()} carbonmapper: {e}")
+        return
+    with db.tx() as con:
+        con.execute("DELETE FROM cm_plumes")
+        con.executemany(
+            """INSERT OR REPLACE INTO cm_plumes(id, observed, lat, lon, inside, emission, uncertainty,
+               sector, platform, wind_speed, png, bounds) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            rows,
+        )
+    db.set_meta("plumes_finished", _now().isoformat())
+    log.info("Carbon Mapper: %d plumes", len(rows))

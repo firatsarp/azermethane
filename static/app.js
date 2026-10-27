@@ -4,12 +4,20 @@ const SAT_COLORS = { s5p: "#5cc28a", iss: "#9cc7ff" };
 const TZ = "Asia/Baku";
 const LOCALE = "en-GB";
 
-const state = { days: [], dayIdx: -1, mode: "day", view: "abs", data: null, passes: [], selPass: null };
+const SECTORS = {
+  "1A1": "Energy (power / heat)", "1B1a": "Coal mining", "1B2": "Oil & gas",
+  "4B": "Livestock (manure)", "6A": "Solid waste (landfill)", "6B": "Wastewater", other: "Other",
+};
+// Plume images are only loaded from this zoom on, and only for plumes in view
+const PLUME_IMG_ZOOM = 8;
+
+const state = { days: [], dayIdx: -1, mode: "day", view: "abs", data: null, passes: [], selPass: null, plumes: [] };
 const $ = (id) => document.getElementById(id);
 
 const fmtDay = (d) => new Date(d + "T12:00:00Z").toLocaleDateString(LOCALE, { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" });
 const fmtTime = (iso) => new Date(iso).toLocaleString(LOCALE, { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: TZ });
 const fmtNum = (v, d = 0) => v == null ? "–" : v.toLocaleString(LOCALE, { maximumFractionDigits: d, minimumFractionDigits: d, useGrouping: false });
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
 async function api(path) {
   const r = await fetch(path);
@@ -81,10 +89,12 @@ map.on("load", async () => {
   map.addLayer({
     id: "plumes", type: "circle", source: "plumes",
     paint: {
-      "circle-radius": ["interpolate", ["linear"], ["coalesce", ["get", "max_ppmm"], 1000], 500, 5, 3000, 9, 8000, 14],
+      "circle-radius": ["interpolate", ["linear"], ["coalesce", ["get", "emission"], 300], 100, 5, 1000, 8, 10000, 14],
       "circle-color": "rgba(255,255,255,0.1)",
       "circle-stroke-color": "#ffffff",
       "circle-stroke-width": 2,
+      // Fade the marker once the plume image itself is visible underneath
+      "circle-stroke-opacity": ["interpolate", ["linear"], ["zoom"], PLUME_IMG_ZOOM, 1, PLUME_IMG_ZOOM + 3, 0.35],
     },
   });
 
@@ -222,31 +232,58 @@ function bindSeg(id, key, cb) {
 bindSeg("mode", "mode", loadTropomi);
 bindSeg("view", "view", () => state.data && renderCells());
 
-// ---- EMIT plumes ---------------------------------------------------------------
+// ---- Carbon Mapper plumes --------------------------------------------------------
 
 function showPlume(f, lngLat) {
-  const p = f.properties;
-  const det = typeof p.details === "string" ? JSON.parse(p.details) : p.details || {};
+  // Rendered features carry nested values as JSON strings, so read the original feature
+  const p = state.plumes.find((x) => x.properties.id === f.properties.id)?.properties ?? f.properties;
+  const [lon, lat] = f.geometry.coordinates;
   const rows = [
+    ["Emission", p.emission != null ? `${fmtNum(p.emission)} ± ${fmtNum(p.uncertainty)} kg/h` : "not published"],
+    ["Sector", esc(SECTORS[p.sector] ?? p.sector ?? "–")],
     ["Observed", fmtTime(p.observed)],
-    ["Max. concentration", p.max_ppmm != null && p.max_ppmm !== "null" ? `${fmtNum(Number(p.max_ppmm))} ppm·m` : "–"],
+    ["Satellite", esc(p.platform ?? "–")],
+    ["Wind", p.wind_speed != null ? `${fmtNum(p.wind_speed, 1)} m/s` : "–"],
   ];
-  for (const [k, v] of Object.entries(det)) {
-    if (/uncertainty|emission|rate|Plume ID/i.test(k)) rows.push([k, v]);
-  }
+  const link = `https://data.carbonmapper.org/?plume_id=${encodeURIComponent(p.id)}#12/${lat.toFixed(4)}/${lon.toFixed(4)}`;
   new maplibregl.Popup().setLngLat(lngLat).setHTML(
-    `<div class="popup"><b>NASA EMIT methane plume</b><table>${rows.map(([a, b]) => `<tr><td>${a}</td><td>${b}</td></tr>`).join("")}</table></div>`
+    `<div class="popup"><b>Methane plume</b><br><small class="muted">${esc(p.id)}</small>
+      <table>${rows.map(([a, b]) => `<tr><td>${a}</td><td>${b}</td></tr>`).join("")}</table>
+      <a href="${link}" target="_blank" rel="noopener">View on Carbon Mapper ↗</a></div>`
   ).addTo(map);
 }
 
+const plumeImages = new Set();
+function addPlumeImages() {
+  if (!$("show-plumes").checked || map.getZoom() < PLUME_IMG_ZOOM) return;
+  const v = map.getBounds();
+  for (const { properties: p } of state.plumes) {
+    const b = p.bounds; // [west, south, east, north]
+    if (!p.png || !b || plumeImages.has(p.id)) continue;
+    if (b[2] < v.getWest() || b[0] > v.getEast() || b[3] < v.getSouth() || b[1] > v.getNorth()) continue;
+    const id = `plume-img-${p.id}`;
+    map.addSource(id, { type: "image", url: p.png, coordinates: [[b[0], b[3]], [b[2], b[3]], [b[2], b[1]], [b[0], b[1]]] });
+    map.addLayer({ id, type: "raster", source: id, minzoom: PLUME_IMG_ZOOM, paint: { "raster-fade-duration": 0 } }, "plumes");
+    plumeImages.add(p.id);
+  }
+}
+map.on("moveend", addPlumeImages);
+
 async function loadPlumes() {
   const gj = await api("/api/plumes");
+  state.plumes = gj.features;
   map.getSource("plumes").setData(gj);
   const n = gj.features.length;
-  const last = n ? new Date(gj.features[0].properties.observed).getFullYear() : null;
+  const last = n ? fmtDay(gj.features[0].properties.observed.slice(0, 10)) : null;
   $("plume-count").textContent = n ? `(${n}, latest: ${last})` : "(none yet)";
+  addPlumeImages();
 }
-$("show-plumes").onchange = (e) => map.setLayoutProperty("plumes", "visibility", e.target.checked ? "visible" : "none");
+$("show-plumes").onchange = (e) => {
+  const vis = e.target.checked ? "visible" : "none";
+  map.setLayoutProperty("plumes", "visibility", vis);
+  plumeImages.forEach((id) => map.setLayoutProperty(`plume-img-${id}`, "visibility", vis));
+  addPlumeImages();
+};
 
 // ---- Passes and satellite positions --------------------------------------------
 

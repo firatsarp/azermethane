@@ -26,15 +26,23 @@ CREATE TABLE IF NOT EXISTS cells (
     n INTEGER NOT NULL,
     PRIMARY KEY (day, source, j, i)
 );
-CREATE TABLE IF NOT EXISTS plumes (
+-- Former NASA EMIT plume table, replaced by Carbon Mapper
+DROP TABLE IF EXISTS plumes;
+-- Carbon Mapper plumes. emission is NULL when Carbon Mapper withholds the estimate.
+-- png is a signed link that expires, so the table is refreshed daily. bounds: JSON [w, s, e, n].
+CREATE TABLE IF NOT EXISTS cm_plumes (
     id TEXT PRIMARY KEY,
-    observed TEXT,
-    lat REAL,
-    lon REAL,
+    observed TEXT NOT NULL,
+    lat REAL NOT NULL,
+    lon REAL NOT NULL,
     inside INTEGER NOT NULL,
-    max_ppmm REAL,
-    props TEXT,
-    geometry TEXT
+    emission REAL,
+    uncertainty REAL,
+    sector TEXT,
+    platform TEXT,
+    wind_speed REAL,
+    png TEXT,
+    bounds TEXT
 );
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,

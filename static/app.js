@@ -125,7 +125,7 @@ async function loadTropomi() {
   const day = state.days[state.dayIdx];
   $("daylabel").innerHTML = state.mode === "day"
     ? `${fmtDay(end)}<small>${day.source === "OFFL" ? "final product" : day.source === "NRTI" ? "near real-time product (NRT)" : "no data"}</small>`
-    : `${fmtDay(start)} – ${fmtDay(end)}<small>${state.mode === "365" ? "1-year" : `${state.mode}-day`} mean</small>`;
+    : `${fmtDay(start)} – ${fmtDay(end)}<small>${state.mode}-day mean</small>`;
   $("prev").disabled = state.dayIdx <= 0;
   $("next").disabled = state.dayIdx >= state.days.length - 1;
   state.data = await api(`/api/tropomi?start=${start}&end=${end}`);
@@ -194,7 +194,7 @@ function renderSpark() {
   svg.innerHTML = h;
 }
 
-// With a year of days each hit rect is under a pixel wide, so pick the nearest day with data by x position
+// With months of days each hit rect is only a few pixels wide, so pick the nearest day with data by x position
 $("spark").addEventListener("click", (e) => {
   const n = state.days.length;
   if (!n) return;

@@ -129,6 +129,19 @@ def _ingest_product(product, source, start, end):
     return added
 
 
+def _prune(oldest):
+    """Drops days that fell out of the backfill window so the database stays small."""
+    day = oldest.date().isoformat()
+    with db.tx() as con:
+        removed = con.execute("DELETE FROM cells WHERE day < ?", (day,)).rowcount
+        con.execute("DELETE FROM granules WHERE day < ?", (day,))
+    if removed:
+        log.info("Removed %d grid rows older than %s", removed, day)
+        # SQLite does not shrink the file on DELETE; VACUUM must run outside a transaction
+        with db.tx() as con:
+            con.execute("VACUUM")
+
+
 def ingest_tropomi():
     TMP_DIR.mkdir(parents=True, exist_ok=True)
     if not login():
@@ -138,6 +151,7 @@ def ingest_tropomi():
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
     cutoff = today - timedelta(days=NRT_DAYS - 1)
     oldest = today - timedelta(days=BACKFILL_DAYS - 1)
+    _prune(oldest)
     db.set_meta("tropomi_started", now.isoformat())
     if oldest < cutoff:
         _ingest_product(TROPOMI_OFFL, "OFFL", oldest, cutoff)

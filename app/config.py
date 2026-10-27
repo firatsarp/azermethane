@@ -15,8 +15,8 @@ TMP_DIR = DATA_DIR / "tmp"
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 COUNTRY_GEOJSON = STATIC_DIR / "azerbaijan.geojson"
 
-# How many days back to fetch (checked on startup and on every run)
-BACKFILL_DAYS = int(os.environ.get("BACKFILL_DAYS", "365"))
+# How many days back to fetch and keep (checked on startup and on every run; older days are deleted)
+BACKFILL_DAYS = int(os.environ.get("BACKFILL_DAYS", "90"))
 # The last NRT_DAYS days come from the NRT (fast) product, older days from OFFL (final)
 NRT_DAYS = int(os.environ.get("NRT_DAYS", "5"))
 INGEST_INTERVAL_MIN = int(os.environ.get("INGEST_INTERVAL_MIN", "90"))
